@@ -184,32 +184,50 @@ def simulate(gam: LinearGAM, x_template: pd.Series, dw0: float, hours: float, st
     out = pd.DataFrame(traj, columns=["t_h","DW"])
     return out
 
+# ---------- helper to build one table and tag species ----------
+def build_tagged_table(data_csv, meta_csv, species_id: int):
+    sens = read_sensor_zhaw(data_csv)
+    meta = read_meta_zhaw(meta_csv)
+
+    # keep only the sensor columns we use (and that exist)
+    have = [c for c in SENSOR_COLS if c in sens.columns]
+    sens = sens[[TIME_COL] + have].copy()
+
+    tbl = build_training_table(sens, meta)  # numeric only, leakage-safe
+    tbl["species_id"] = species_id          # simple numeric flag (0/1)
+    return tbl
+
 # ---------- MAIN ----------
 if __name__ == "__main__":
-    sensors = read_sensor_zhaw(ZHAW_DATA_CSV)
-    meta    = read_meta_zhaw(ZHAW_META_CSV)
+    # 0 = Viridiella, 1 = Chlamydomonas (order doesn’t matter)
+    tbl_v = build_tagged_table(ZHAW_VIRIDIELLA_DATA_CSV, ZHAW_VIRIDIELLA_META_CSV, species_id=0)
+    tbl_c = build_tagged_table(ZHAW_CHLAMYDOMONAS_DATA_CSV, ZHAW_CHLAMYDOMONAS_META_CSV, species_id=1)
 
-    # keep only sensor columns we use
-    have = [c for c in SENSOR_COLS if c in sensors.columns]
-    sensors = sensors[[TIME_COL] + have].copy()
+    # Align columns (should match given same schema; keep intersection just in case)
+    common_cols = sorted(set(tbl_v.columns).intersection(set(tbl_c.columns)))
+    data_num = pd.concat([tbl_v[common_cols], tbl_c[common_cols]], ignore_index=True)
 
-    data_num = build_training_table(sensors, meta)
-    if "g_rate" not in data_num.columns or len(data_num) < 5:
-        raise RuntimeError("Too few growth-interval rows; check DW points and file paths.")
+    # Basic cleanup
+    data_num = data_num.replace([np.inf, -np.inf], np.nan).dropna()
+    if "g_rate" not in data_num.columns or len(data_num) < 8:
+        raise RuntimeError(f"Too few growth-interval rows after merge: {len(data_num)}")
 
+    # Train/test split (time-ordered within each file; concatenation order is fine here)
     Xtr, ytr, Xte, yte, cols, train_df, test_df = time_split(data_num, target="g_rate", train_frac=0.8)
+
+    # Fit GAM
     gam = build_gam(n_features=len(cols))
     gam = fit_gam(gam, Xtr, ytr)
     metrics = evaluate_gam(gam, Xtr, ytr, Xte, yte)
 
-    print(f"Training rows: {len(Xtr)}, Test rows: {len(Xte)}, Features: {len(cols)}")
+    print(f"Rows total: {len(data_num)}, Train: {len(Xtr)}, Test: {len(Xte)}, Features: {len(cols)}")
     print("GAM metrics:", metrics)
 
-    # Top effects (std dev of partial dependence over the grid)
+    # Top effects (std dev of partial dependence)
     effects = {}
     for i, name in enumerate(cols):
-        XX = gam.generate_X_grid(term=i)           # shape: (n_grid, n_features)
-        pdp = gam.partial_dependence(term=i, X=XX) # vector length n_grid
+        XX = gam.generate_X_grid(term=i)
+        pdp = gam.partial_dependence(term=i, X=XX)
         effects[name] = float(np.std(pdp))
     top = sorted(effects.items(), key=lambda x: x[1], reverse=True)[:10]
     print("Top effect drivers:", top)
