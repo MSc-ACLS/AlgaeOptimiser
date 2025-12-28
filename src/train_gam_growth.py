@@ -4,6 +4,8 @@ import pandas as pd
 import numpy as np
 from pygam import LinearGAM, s, te
 from dataclasses import dataclass
+import matplotlib.pyplot as plt
+
 
 # ---------- CONFIG ----------
 ZHAW_VIRIDIELLA_DATA_CSV = "../data/zhaw_viridiella.csv"        # sensors (minute-level)
@@ -236,3 +238,87 @@ if __name__ == "__main__":
     x0 = train_df.drop(columns=["g_rate"]).median()
     sim = simulate(gam, x0, dw0=float(train_df["dw0"].median()), hours=72, step_h=1.0)
     print(sim.head())
+        
+        # ---------- PREDICTIONS ----------
+    yhat_tr = gam.predict(Xtr)
+    yhat_te = gam.predict(Xte)
+
+    res_tr = ytr - yhat_tr
+    res_te = yte - yhat_te
+
+    # ---------- FIGURE 1: Observed vs Predicted ----------
+    plt.figure(figsize=(6.5, 5.5))
+    plt.scatter(ytr, yhat_tr, s=25, alpha=0.7, label="Train")
+    plt.scatter(yte, yhat_te, s=25, alpha=0.7, label="Test", marker="s")
+
+    mn = float(min(np.min(ytr), np.min(yte), np.min(yhat_tr), np.min(yhat_te)))
+    mx = float(max(np.max(ytr), np.max(yte), np.max(yhat_tr), np.max(yhat_te)))
+    plt.plot([mn, mx], [mn, mx], linewidth=1)
+
+    plt.xlabel("Observed growth rate g (g/L/h)")
+    plt.ylabel("Predicted growth rate g (g/L/h)")
+    plt.title(f"GAM growth model performance (R² test = {metrics['r2_test']:.2f})")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig("fig_gam_obs_vs_pred.png", dpi=300)
+    plt.close()
+
+    # ---------- FIGURE 2: Residuals (test) vs predicted ----------
+    plt.figure(figsize=(6.5, 5.0))
+    plt.scatter(yhat_te, res_te, s=25, alpha=0.75)
+    plt.axhline(0, linewidth=1)
+    plt.xlabel("Predicted growth rate g (g/L/h)")
+    plt.ylabel("Residual (observed - predicted)")
+    plt.title("GAM residuals on test split")
+    plt.tight_layout()
+    plt.savefig("fig_gam_residuals_test.png", dpi=300)
+    plt.close()
+
+    # ---------- FIGURE 3A: Effect size bar chart ----------
+    # (uses your existing 'effects' dict; if not available, rebuild it)
+    effects = {}
+    for i, name in enumerate(cols):
+        XX = gam.generate_X_grid(term=i)
+        pdp = gam.partial_dependence(term=i, X=XX)
+        effects[name] = float(np.std(pdp))
+
+    top = sorted(effects.items(), key=lambda x: x[1], reverse=True)[:10]
+    names = [t[0] for t in top][::-1]
+    vals  = [t[1] for t in top][::-1]
+
+    plt.figure(figsize=(7.5, 4.8))
+    plt.barh(names, vals)
+    plt.xlabel("Effect size (std. of partial dependence)")
+    plt.title("Top drivers of growth rate in GAM")
+    plt.tight_layout()
+    plt.savefig("fig_gam_effect_sizes.png", dpi=300)
+    plt.close()
+
+    # ---------- FIGURE 3B: Partial dependence for top 4 drivers ----------
+    top4 = sorted(effects.items(), key=lambda x: x[1], reverse=True)[:4]
+
+    fig, axes = plt.subplots(2, 2, figsize=(9.0, 6.5))
+    axes = axes.ravel()
+
+    for ax, (name, _) in zip(axes, top4):
+        i = cols.index(name)
+        XX = gam.generate_X_grid(term=i)
+
+        # pygam can return confidence intervals if width is set
+        pdp, confi = gam.partial_dependence(term=i, X=XX, width=0.95)
+        x = XX[:, i]
+
+        ax.plot(x, pdp, linewidth=1.5)
+        ax.fill_between(x, confi[:, 0], confi[:, 1], alpha=0.25)
+        ax.set_title(name)
+        ax.set_xlabel(name)
+        ax.set_ylabel("Partial effect on g")
+
+    # if fewer than 4, hide unused axes
+    for j in range(len(top4), 4):
+        axes[j].axis("off")
+
+    fig.suptitle("GAM partial dependence (95% CI)")
+    fig.tight_layout()
+    fig.savefig("fig_gam_partial_dependence_top4.png", dpi=300)
+    plt.close(fig)
